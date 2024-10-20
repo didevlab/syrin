@@ -1,0 +1,31 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svce-ollama-ui
+  namespace: services
+spec:
+  type: NodePort
+  ports:
+  - name: ollama-tcp
+    nodePort: 30006
+    port: 80
+    targetPort: http-ollama
+    protocol: TCP
+  selector:
+    app: ollama
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-ollama-ui
+  namespace: services
+spec:
+  type: ClusterIP
+  ports:
+  - name: ollama-tcp
+    port: 11434
+    targetPort: http-ollama
+    protocol: TCP
+  selector:
+    app: ollama

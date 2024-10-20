@@ -1,0 +1,221 @@
+apiVersion: v1
+data:
+  main.py: |-
+    import os
+    import pika
+    import json
+    import logging
+    import requests
+
+    # Configurar o log de nível INFO
+    logging.basicConfig(level=logging.INFO)
+
+    # Desativar logs de debug do pika, configurando para WARNING ou superior
+    logging.getLogger("pika").setLevel(logging.WARNING)
+
+    # Carregar configurações do RabbitMQ das variáveis de ambiente
+    rabbitmq_host = os.getenv('RABBITMQ_HOST', '')
+    rabbitmq_port = int(os.getenv('RABBITMQ_PORT', 30672))
+    rabbitmq_vhost = os.getenv('RABBITMQ_VHOST', '')
+    rabbitmq_user = os.getenv('RABBITMQ_USER', '')
+    rabbitmq_pass = os.getenv('RABBITMQ_PASS', '')
+    rabbitmq_ttl_dlx = int(os.getenv('RABBITMQ_TTL_DLX', 60000))  # 60 segundos de TTL (60000 ms)
+
+    # Carregar configurações da IA Ollama
+    OLLAMA_HOSTNAME = os.getenv('OLLAMA_HOSTNAME', '')
+    OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', '')
+
+    # Carregar configurações da IA Ollama
+    PROMPT_ERROR = os.getenv('PROMPT_ERROR', 'Irei te passar um texto, onde desejo que você me informe de forma profissional e direta o que aconteceu, sua informação deve solicitar que uma equipe técnica seja envolvida para resolver o problema de forma resumida, a sua resposta nunca deve ultrapassar mais que 200 caracteres, segue o texto:')
+    PROMPT_GENERIC = os.getenv('PROMPT_GENERIC', 'Irei te passar um texto, onde desejo que você utilize humor, o texto será enviado em português do Brasil, sua resposta deve ser exataemnte e somente uma frase em português, sua resposta deve ser no tom de informação ou ordenação para que eu realize alguma ação conforme o conteúdo do seguinte texto:')
+
+    def connect_to_rabbitmq():
+        try:
+            # Definir as credenciais e os parâmetros de conexão
+            credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_pass)
+            
+            # Definir as propriedades do cliente, incluindo o nome da conexão
+            client_properties = {
+                "connection_name": "Syrin Text Humanized Agent"
+            }
+            
+            parameters = pika.ConnectionParameters(
+                host=rabbitmq_host,
+                port=rabbitmq_port,
+                virtual_host=rabbitmq_vhost,
+                credentials=credentials,
+                client_properties=client_properties  # Passar o nome da conexão aqui
+            )
+            
+            return pika.BlockingConnection(parameters)
+        except Exception as e:
+            logging.error(f"Erro ao conectar ao RabbitMQ: {str(e)}")
+            return None
+
+    def delete_queue_if_exists(channel, queue_name):
+        try:
+            # Tentativa de deletar a fila existente
+            channel.queue_delete(queue=queue_name)
+            logging.info(f"Fila '{queue_name}' deletada com sucesso.")
+        except pika.exceptions.ChannelClosedByBroker as e:
+            if e.reply_code == 404:
+                logging.info(f"Fila '{queue_name}' não existe. Nenhuma ação necessária.")
+            else:
+                logging.error(f"Erro ao deletar a fila '{queue_name}': {str(e)}")
+                raise
+
+    def requestOllama(text, level):
+        url = f"http://{OLLAMA_HOSTNAME}/api/generate"
+
+        if level == "error":
+            prompt = f"{PROMPT_ERROR} {text}"
+        else:
+            prompt = f"{PROMPT_GENERIC} {text}"
+
+        payload = {
+            "model": OLLAMA_MODEL,
+            "stream": False,
+            "prompt": prompt
+        }
+
+        try:
+            response = requests.post(url, json=payload, timeout=120)
+            response.raise_for_status()
+            response_data = response.json()
+
+            return response_data.get("response")
+        except requests.RequestException as e:
+            logging.error(f"Erro na solicitação para Ollama: {str(e)}")
+            return ""
+
+    def declare_reprocess_queue(channel):
+        try:
+            # Deletar a fila se ela já existir para evitar conflito de parâmetros
+            delete_queue_if_exists(channel, '001_notification_reprocess_humanized')
+            
+            # Declarar a fila com TTL e DLX
+            channel.queue_declare(
+                queue='001_notification_reprocess_humanized',
+                durable=True,
+                arguments={
+                    'x-message-ttl': rabbitmq_ttl_dlx,  # 60 segundos de TTL (60000 ms)
+                    'x-dead-letter-exchange': '',  # DLX padrão para rotear para outra fila
+                    'x-dead-letter-routing-key': '001_notification_process_humanized'  # Fila para onde a mensagem será movida
+                }
+            )
+            logging.info(f"Fila '001_notification_reprocess_humanized' verificada ou criada com TTL de {rabbitmq_ttl_dlx} ms.")
+        except Exception as e:
+            logging.error(f"Erro ao declarar a fila de reprocessamento: {str(e)}")
+
+    def reprocess_message(channel, message):
+        try:
+            # Garantir que a fila foi declarada corretamente com os argumentos TTL e DLX
+            declare_reprocess_queue(channel)
+            
+            # Publicar a mensagem na fila
+            channel.basic_publish(
+                exchange='',
+                routing_key='001_notification_reprocess_humanized',
+                body=json.dumps(message, ensure_ascii=False),  # Permitir caracteres especiais no JSON
+                properties=pika.BasicProperties(delivery_mode=2)  # Persistir a mensagem
+            )
+            
+            logging.info(f"Mensagem enviada para a fila de reprocessamento: {message['text']}")
+        except Exception as e:
+            logging.error(f"Erro ao reprocessar a mensagem: {str(e)}")
+
+    def send_to_humanized_queue(channel, text_humanized, original_message):
+        try:
+            # Garantir que a fila '001_notification_process_humanized' exista
+            channel.queue_declare(queue='001_notification_process_humanized', durable=True)
+
+            # Enviar o texto humanizado para a fila
+            message = {
+                'original_text': original_message['text'],
+                'level': original_message['level'],
+                'humanized_text': text_humanized
+            }
+            
+            channel.basic_publish(
+                exchange='',
+                routing_key='001_notification_process_humanized',
+                body=json.dumps(message, ensure_ascii=False),  # Permitir caracteres especiais no JSON
+                properties=pika.BasicProperties(delivery_mode=2)  # Persistir a mensagem
+            )
+            
+            logging.info(f"Mensagem humanizada enviada para a fila '001_notification_process_humanized': {message}")
+        except Exception as e:
+            logging.error(f"Erro ao enviar a mensagem para a fila humanizada: {str(e)}")
+
+    def on_message_callback(channel, method_frame, header_frame, body):
+        try:
+            message = json.loads(body.decode())
+
+            logging.info(f"Mensagem recebida da fila {method_frame.routing_key}: {message['text']}, {message['level']}")
+            text_humanized = requestOllama(message['text'], message['level'])
+
+            if text_humanized:
+                logging.info(f"Mensagem humanizada: {text_humanized}")
+                send_to_humanized_queue(channel, text_humanized, message)
+            else:
+                logging.error(f"Falha ao humanizar a mensagem: {message['text']}")
+                reprocess_message(channel, message)
+            
+            # Confirma que a mensagem foi processada com sucesso
+            channel.basic_ack(method_frame.delivery_tag)
+        except Exception as e:
+            logging.error(f"Erro no callback ao processar mensagem: {str(e)}")
+            channel.basic_ack(method_frame.delivery_tag)
+
+    def consume_messages():
+        try:
+            connection = connect_to_rabbitmq()
+            if connection is None:
+                logging.error("Conexão com RabbitMQ falhou. Encerrando a aplicação.")
+                return
+
+            channel = connection.channel()
+
+            # Declarar todas as filas para garantir que elas existam antes do consumo
+            queues_to_declare = [
+                '000_notification_error',
+                '000_notification_warning',
+                '001_notification_process_humanized'
+            ]
+
+            for queue in queues_to_declare:
+                channel.queue_declare(queue=queue, durable=True)
+                logging.info(f"Fila '{queue}' verificada ou criada.")
+
+            # Verificar ou declarar a fila de reprocessamento com TTL e DLX
+            declare_reprocess_queue(channel)
+
+            # Registrar o callback para as filas de erro e aviso
+            channel.basic_consume(queue='000_notification_error', on_message_callback=on_message_callback)
+            channel.basic_consume(queue='000_notification_warning', on_message_callback=on_message_callback)
+
+            logging.info("Aguardando mensagens...")
+
+            # Iniciar o consumo de mensagens
+            channel.start_consuming()
+        except Exception as e:
+            logging.error(f"Erro no consumo de mensagens: {str(e)}")
+        finally:
+            if connection and connection.is_open:
+                connection.close()
+                logging.info("Conexão com RabbitMQ fechada.")
+
+    if __name__ == "__main__":
+        try:
+            logging.info("Syrin text humanized - started \o/")
+            consume_messages()
+        except Exception as e:
+            logging.error(f"Erro na execução da aplicação: {str(e)}")
+
+
+
+
+kind: ConfigMap
+metadata:
+  name: cm-syrin-humanization
+  namespace: syrin

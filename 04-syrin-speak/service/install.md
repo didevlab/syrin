@@ -15,13 +15,19 @@ sudo systemctl start syrin-speak.service
 sudo systemctl status syrin-speak.service
 journalctl -u syrin-speak.service -f
 
-Or
-cd /myenv
-touch syrin-speak.py
-copy content syrin-speak.py and paste in syrin-speak.py
-vim syrin-speak.py
+OR
+
 sudo apt install portaudio19-dev python3-pyaudio
+
 sudo source myenv/bin/activate
+cd /myenv
+sudo cp syrin-speak.py /root/myenv/syrin-speak.py
+
+mkdir -p ~/.config/systemd/user/
+cp ./service/syrin-speak.service ~/.config/systemd/user/syrin-speak.service
+
+systemctl --user daemon-reload
+systemctl --user enable syrin-speak.service
 systemctl --user start syrin-speak.service
 systemctl --user status syrin-speak.service
 journalctl --user-unit syrin-speak.service -f

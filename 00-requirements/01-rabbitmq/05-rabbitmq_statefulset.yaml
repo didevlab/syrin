@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: services
+  labels:
+    app: rabbitmq
+    version: "3.12.14"
+    tag: rabbitmq
+spec:
+  selector:
+    matchLabels:
+      app: "rabbitmq"
+      version: "3.12.14"
+  serviceName: rabbitmq-headless
+  replicas: 1 #3
+  template:
+    metadata:
+      name: rabbitmq
+      namespace: services
+      labels:
+        app: rabbitmq
+        version: "3.12.14"
+        component: queue
+    spec:
+      # affinity:
+      #   nodeAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       nodeSelectorTerms:
+      #         - matchExpressions:
+      #             - key: "kubernetes.io/hostname"
+      #               operator: In
+      #               values:
+      #                 - "k8s-02"
+      #         - matchExpressions:
+      #             - key: apps
+      #               operator: In
+      #               values:
+      #                 - services    
+      initContainers:
+        - name: "rabbitmq-config"
+          image: busybox:1.32.0
+          volumeMounts:
+            - name: rabbitmq-config
+              mountPath: /tmp/rabbitmq
+            - name: rabbitmq-config-rw
+              mountPath: /etc/rabbitmq
+          command:
+            - sh
+            - -c
+            - cp /tmp/rabbitmq/rabbitmq.conf /etc/rabbitmq/rabbitmq.conf && echo '' >> /etc/rabbitmq/rabbitmq.conf;
+              cp /tmp/rabbitmq/enabled_plugins /etc/rabbitmq/enabled_plugins
+      volumes:
+        - name: rabbitmq-config
+          configMap:
+            name: rabbitmq-config
+            optional: false
+            items:
+              - key: enabled_plugins
+                path: "enabled_plugins"
+              - key: rabbitmq.conf
+                path: "rabbitmq.conf"
+        - name: rabbitmq-config-rw
+          emptyDir: {}
+        - name: rabbitmq-data
+          hostPath:
+            path: /storage/db/rabbitmq # CREATE THIS DIRECTORY /storage/db/rabbitmq IN VM NODE
+      serviceAccount: rabbitmq
+      securityContext:
+        fsGroup: 999
+        runAsUser: 999
+        runAsGroup: 999
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.12.14-management
+          volumeMounts:
+            - name: rabbitmq-config-rw
+              mountPath: "/etc/rabbitmq"
+            - name: rabbitmq-data
+              mountPath: "/var/lib/rabbitmq/mnesia"
+          env:
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: s-rabbitmq
+                  key: RABBITMQ_DEFAULT_PASS
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: s-rabbitmq
+                  key: RABBITMQ_DEFAULT_USER
+            - name: RABBITMQ_ERLANG_COOKIE
+              value: "12345"
+            - name: RABBITMQ_DEFAULT_VHOST
+              value: "syrin"
+            - name: RABBITMQ_USE_LONGNAME
+              value: "true"
+            - name: MY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MY_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: K8S_SERVICE_NAME
+              value: "rabbitmq-headless"
+            - name: RABBITMQ_NODENAME
+              value: rabbit@$(MY_POD_NAME).$(K8S_SERVICE_NAME).$(MY_POD_NAMESPACE).svc.cluster.local
+            - name: K8S_HOSTNAME_SUFFIX
+              value: .$(K8S_SERVICE_NAME).$(MY_POD_NAMESPACE).svc.cluster.local
+            - name: TZ
+              value: America/Sao_Paulo
+          ports:
+            - name: amqp
+              containerPort: 5672
+              protocol: TCP
+            - name: management
+              containerPort: 15672
+              protocol: TCP
+            - name: prometheus
+              containerPort: 15692
+              protocol: TCP
+            - name: epmd
+              containerPort: 4369
+              protocol: TCP
+          livenessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "status"]
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 15
+          readinessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "ping"]
+            initialDelaySeconds: 20
+            periodSeconds: 60
+            timeoutSeconds: 10

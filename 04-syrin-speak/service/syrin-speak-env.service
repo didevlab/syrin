@@ -32,4 +32,4 @@ ProtectSystem=off
 ProtectHome=no
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

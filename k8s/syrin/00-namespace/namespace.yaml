@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: syrin
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s-token-docker-hub
+  namespace: syrin
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: <YOUR-TOKEN-DOCKER-HUB>

@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: de-syrin-rest-api
+  namespace: syrin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: syrin-rest-api
+      component: syrin
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: syrin-rest-api
+        component: syrin
+    spec:
+      imagePullSecrets:
+        - name: s-token-docker-hub
+      containers:
+        - name: syrin-rest-api
+          image: didevlab/poc:syrin_restapi-1.0.0
+          ports:
+            - name: "80-syrinrestapi"
+              containerPort: 80
+          command:
+            - "gunicorn"
+            - "-w"
+            - "1"
+            - "-b"
+            - "0.0.0.0:80"
+            - "main:app"
+            - "--capture-output"
+          env:
+            - name: TZ
+              value: "America/Sao_Paulo"
+            - name: PORT
+              value: "80"
+
+            - name: RABBITMQ_HOST
+              value: "svc-rabbitmq.services.svc.cluster.local"
+            - name: RABBITMQ_PORT
+              value: "5672"
+            - name: RABBITMQ_VHOST
+              value: "syrin"
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: s-rabbitmq
+                  key: RABBITMQ_DEFAULT_USER
+            - name: RABBITMQ_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: s-rabbitmq
+                  key: RABBITMQ_DEFAULT_PASS
+
+          volumeMounts:
+            - name: syrin-rest-api
+              mountPath: /app/main.py
+              subPath: main.py
+
+      volumes:
+        - name: syrin-rest-api
+          configMap:
+            name: cm-syrin-rest-api
+
+      # affinity:
+      #   nodeAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       nodeSelectorTerms:
+      #       - matchExpressions:
+      #         - key: apps
+      #           operator: In
+      #           values:
+      #           - services

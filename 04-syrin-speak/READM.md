@@ -1,3 +1,4 @@
+
 # Syrin Speak Audio Agent
 
 ## Description
@@ -26,9 +27,9 @@ This project implements an audio agent to process messages received from a Rabbi
   - `sounddevice` (for audio playback)
   - `numpy` (for audio data processing)
   - `wave` (for reading WAV audio files)
-  
+
   You can install the dependencies using the following command:
-  
+
   ```bash
   pip install pika minio sounddevice numpy wave
   ```
@@ -159,42 +160,59 @@ sudo pip install sounddevice
 
 ### Alternative Installation with Virtual Environment
 
-1. Navigate to the virtual environment directory:
-    ```bash
-    cd /myenv
-    ```
-
-2. Create the `syrin-speak.py` script:
-    ```bash
-    touch syrin-speak.py
-    ```
-
-3. Copy the content of the script and paste it into `syrin-speak.py`:
-    ```bash
-    vim syrin-speak.py
-    ```
-
-4. Install additional dependencies for audio:
+1. Install additional dependencies for audio:
     ```bash
     sudo apt install portaudio19-dev python3-pyaudio
     ```
 
-5. Activate the virtual environment:
+2. Activate your virtual environment:
     ```bash
     sudo source myenv/bin/activate
     ```
 
-6. Start the service as a user service:
+3. Navigate to the virtual environment directory:
+    ```bash
+    cd /myenv
+    ```
+
+4. Copy the `syrin-speak.py` script:
+    ```bash
+    sudo cp syrin-speak.py /root/myenv/syrin-speak.py
+    ```
+
+5. Set up the user service:
+
+   - Create the necessary directories:
+     ```bash
+     mkdir -p ~/.config/systemd/user/
+     ```
+
+   - Copy the service file:
+     ```bash
+     cp ./service/syrin-speak.service ~/.config/systemd/user/syrin-speak.service
+     ```
+
+6. Reload the systemd daemon for user services:
+    ```bash
+    systemctl --user daemon-reload
+    ```
+
+7. Enable the service for the current user:
+    ```bash
+    systemctl --user enable syrin-speak.service
+    ```
+
+8. Start the service as a user service:
     ```bash
     systemctl --user start syrin-speak.service
     ```
 
-7. Check the status of the user service:
+9. Check the status of the user service:
     ```bash
     systemctl --user status syrin-speak.service
     ```
 
-8. View the logs for the user service:
+10. View the logs for the user service:
     ```bash
     journalctl --user-unit syrin-speak.service -f
     ```

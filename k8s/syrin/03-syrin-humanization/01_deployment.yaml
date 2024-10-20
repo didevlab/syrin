@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: de-syrin-humanization
+  namespace: syrin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: syrin-humanization
+      component: syrin
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: syrin-humanization
+        component: syrin
+    spec:
+      imagePullSecrets:
+        - name: s-token-docker-hub
+      containers:
+        - name: syrin-humanization
+          image: didevlab/poc:syrin_humanization-1.0.0
+          command:
+            - "python3"
+            - "main.py"
+          env:
+            - name: TZ
+              value: "America/Sao_Paulo"
+            - name: PROMPT_ERROR
+              value: "Irei te passar um texto, onde desejo que você me informe de forma profissional e direta o que aconteceu, sua informação deve solicitar que uma equipe técnica seja envolvida para resolver o problema de forma resumida, a sua resposta nunca deve ultrapassar mais que 200 caracteres, segue o texto:"
+            - name: PROMPT_GENERIC
+              value: "Irei te passar um texto, onde desejo que você utilize humor, o texto será enviado em português do Brasil, sua resposta deve ser exataemnte e somente uma frase em português, sua resposta deve ser no tom de informação ou ordenação para que eu realize alguma ação conforme o conteúdo do seguinte texto:"
+
+            - name: RABBITMQ_HOST
+              value: "svc-rabbitmq.services.svc.cluster.local"
+            - name: RABBITMQ_PORT
+              value: "5672"
+            - name: RABBITMQ_VHOST
+              value: "syrin"
+            - name: RABBITMQ_TTL_DLX
+              value: "60000" # 60 segundos de TTL (60000 ms)
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: s-rabbitmq
+                  key: RABBITMQ_DEFAULT_USER
+            - name: RABBITMQ_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: s-rabbitmq
+                  key: RABBITMQ_DEFAULT_PASS
+
+            - name: OLLAMA_HOSTNAME
+              value: "svc-ollama-ui.services.svc.cluster.local:11434"
+            - name: OLLAMA_MODEL
+              value: "llama3.1"
+           
+            - name: RABBITMQ_SLEEP_TIME
+              value: "1"
+
+          volumeMounts:
+            - name: syrin-humanization
+              mountPath: /app/main.py
+              subPath: main.py
+
+      volumes:
+        - name: syrin-humanization
+          configMap:
+            name: cm-syrin-humanization
+
+      # affinity:
+      #   nodeAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       nodeSelectorTerms:
+      #         - matchExpressions:
+      #             - key: apps
+      #               operator: In
+      #               values:
+      #                 - services

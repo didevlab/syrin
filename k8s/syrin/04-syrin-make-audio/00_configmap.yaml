@@ -1,0 +1,250 @@
+apiVersion: v1
+data:
+  main.py: |-
+    import os
+    import pika
+    import json
+    import logging
+    import torch
+    import shutil  # Para deletar arquivos
+    from datetime import datetime
+    from minio import Minio
+    from minio.error import S3Error
+    from TTS.api import TTS  # Biblioteca Coqui TTS
+
+    # Configurar o log de nível INFO
+    logging.basicConfig(level=logging.INFO)
+
+    # Desativar logs de debug do pika, configurando para WARNING ou superior
+    logging.getLogger("pika").setLevel(logging.WARNING)
+
+    # Verifique se CUDA está disponível (para aceleração com GPU, se necessário)
+    use_cuda = torch.cuda.is_available()
+
+    # Carrega o modelo YourTTS do Coqui (multilingual)
+    tts = TTS(model_name="tts_models/multilingual/multi-dataset/your_tts", progress_bar=False, gpu=use_cuda)
+
+    # Carregar configurações do RabbitMQ das variáveis de ambiente
+    rabbitmq_host = os.getenv('RABBITMQ_HOST', '')
+    rabbitmq_port = int(os.getenv('RABBITMQ_PORT', 30672))
+    rabbitmq_vhost = os.getenv('RABBITMQ_VHOST', '')
+    rabbitmq_user = os.getenv('RABBITMQ_USER', '')
+    rabbitmq_pass = os.getenv('RABBITMQ_PASS', '')
+
+    # Configuração do TTL e DLX para reprocessamento
+    rabbitmq_ttl_dlx = int(os.getenv('RABBITMQ_TTL_DLX', 60000))  # 60 segundos de TTL (60000 ms)
+
+    # Carregar configurações do MinIO das variáveis de ambiente
+    MINIO_URL = os.getenv('MINIO_URL', '')
+    MINIO_PORT = os.getenv('MINIO_PORT', '')
+    MINIO_ROOT_USER = os.getenv('MINIO_ROOT_USER', '')
+    MINIO_ROOT_PASSWORD = os.getenv('MINIO_ROOT_PASSWORD', '')
+    MINIO_BUCKET_WORK = os.getenv('MINIO_BUCKET_WORK', '')
+
+    # Conectar ao MinIO
+    minio_client = Minio(
+        f"{MINIO_URL}:{MINIO_PORT}",
+        access_key=MINIO_ROOT_USER,
+        secret_key=MINIO_ROOT_PASSWORD,
+        secure=False
+    )
+
+    # Função para upload do arquivo para o MinIO
+    def upload_to_minio(file_path, file_name):
+        try:
+            # Verifica se o bucket existe, caso contrário, cria o bucket
+            if not minio_client.bucket_exists(MINIO_BUCKET_WORK):
+                minio_client.make_bucket(MINIO_BUCKET_WORK)
+            
+            # Faz o upload do arquivo
+            minio_client.fput_object(
+                MINIO_BUCKET_WORK, 
+                file_name, 
+                file_path,
+                content_type="audio/wav"
+            )
+            logging.info(f"Arquivo {file_name} enviado para o bucket {MINIO_BUCKET_WORK} no MinIO.")
+            return True
+        except S3Error as e:
+            logging.error(f"Erro ao enviar o arquivo para o MinIO: {str(e)}")
+            return False
+
+    def delete_local_file(file_path):
+        try:
+            os.remove(file_path)
+            logging.info(f"Arquivo local {file_path} deletado com sucesso.")
+        except OSError as e:
+            logging.error(f"Erro ao deletar o arquivo local: {file_path} - {str(e)}")
+
+    def publish_to_start_queue(channel, message):
+        try:
+            queue = '003_notification_process_play_audio'
+            channel.queue_declare(queue=queue, durable=True)
+            channel.basic_publish(
+                exchange='',
+                routing_key=queue,
+                body=json.dumps(message, ensure_ascii=False),
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
+            logging.info(f"Mensagem publicada na fila {queue}: {message}")
+        except Exception as e:
+            logging.error(f"Erro ao publicar mensagem na fila {queue}: {str(e)}")
+
+    def publish_to_reprocess_queue(channel, message):
+        try:
+            # Declarar a fila de reprocessamento com TTL e DLX
+            channel.queue_declare(
+                queue='002_notification_reprocess_make_audio',
+                durable=True,
+                arguments={
+                    'x-message-ttl': rabbitmq_ttl_dlx,  # TTL configurável (1 minuto)
+                    'x-dead-letter-exchange': '',  # DLX padrão para rotear para outra fila
+                    'x-dead-letter-routing-key': '001_notification_process_humanized'  # Fila para onde a mensagem será movida
+                }
+            )
+            # Publicar a mensagem na fila de reprocessamento
+            channel.basic_publish(
+                exchange='',
+                routing_key='002_notification_reprocess_make_audio',
+                body=json.dumps(message, ensure_ascii=False),
+                properties=pika.BasicProperties(delivery_mode=2)
+            )
+            logging.info(f"Mensagem enviada para a fila de reprocessamento: {message['humanized_text']}")
+        except Exception as e:
+            logging.error(f"Erro ao enviar a mensagem para a fila de reprocessamento: {str(e)}")
+
+    def connect_to_rabbitmq():
+        try:
+            # Definir as credenciais e os parâmetros de conexão
+            credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_pass)
+            
+            # Definir as propriedades do cliente, incluindo o nome da conexão
+            client_properties = {
+                "connection_name": "Syrin Make Audio Agent"
+            }
+            
+            parameters = pika.ConnectionParameters(
+                host=rabbitmq_host,
+                port=rabbitmq_port,
+                virtual_host=rabbitmq_vhost,
+                credentials=credentials,
+                client_properties=client_properties  # Passar o nome da conexão aqui
+            )
+            
+            return pika.BlockingConnection(parameters)
+        except Exception as e:
+            logging.error(f"Erro ao conectar ao RabbitMQ: {str(e)}")
+            return None
+
+    def tts_make(txt):
+        try:
+            # Criar a variável filedateprocess com a data e hora no formato DD_MM_YYYY_HH_MM_SS
+            filedateprocess = datetime.now().strftime('%d_%m_%Y_%H_%M_%S')
+
+            output_path = f"/tmp/{filedateprocess}.wav"
+
+            # Gera o arquivo de áudio
+            tts.tts_to_file(
+                text=txt,
+                speaker_wav="/app/veicaetano.wav",
+                language="pt-br",
+                file_path=output_path
+            )
+
+            return filedateprocess, output_path
+        except Exception as e:
+            logging.error(f"Erro ao gerar o áudio: {str(e)}")
+            return None, None
+
+    def on_message_callback(channel, method_frame, header_frame, body):
+        try:
+            message = json.loads(body.decode())
+
+            logging.info(f"Mensagem recebida da fila {method_frame.routing_key}: {message['humanized_text']}, Nível: {message['level']}")
+
+            # Enviar o texto para a função tts_make
+            filedateprocess, output_path = tts_make(message['humanized_text'])
+
+            if filedateprocess and output_path:
+                # Tentar fazer o upload do arquivo para o MinIO
+                if upload_to_minio(output_path, f"{filedateprocess}.wav"):
+                    # Apagar o arquivo local após upload bem-sucedido
+                    delete_local_file(output_path)
+
+                    # Incrementar o campo filename
+                    message['filename'] = f"{filedateprocess}.wav"
+
+                    # Publicar a mensagem incrementada na fila process_notification_start
+                    publish_to_start_queue(channel, message)
+
+                    # Confirma que a mensagem foi processada e removida da fila original
+                    channel.basic_ack(method_frame.delivery_tag)
+                else:
+                    # Falha ao fazer o upload, enviar para fila de reprocessamento
+                    logging.error(f"Falha ao publicar o áudio gerado. Enviando para fila de reprocessamento.")
+                    publish_to_reprocess_queue(channel, message)
+                    channel.basic_ack(method_frame.delivery_tag)  # Confirmar que a mensagem foi processada
+            else:
+                # Falha ao gerar o áudio, enviar para fila de reprocessamento
+                logging.error(f"Erro ao processar a mensagem: {message['humanized_text']}. Arquivo de áudio não foi gerado.")
+                publish_to_reprocess_queue(channel, message)
+                channel.basic_ack(method_frame.delivery_tag)  # Confirmar que a mensagem foi processada
+        except Exception as e:
+            logging.error(f"Erro no callback ao processar mensagem: {str(e)}")
+            channel.basic_ack(method_frame.delivery_tag)
+
+    def consume_messages():
+        try:
+            connection = connect_to_rabbitmq()
+            if connection is None:
+                logging.error("Conexão com RabbitMQ falhou. Encerrando a aplicação.")
+                return
+
+            channel = connection.channel()
+
+            # Declarar as filas para garantir que elas existam
+            queues_to_declare = [
+                '001_notification_process_humanized',
+                '002_notification_reprocess_make_audio',
+                '003_notification_process_play_audio',
+            ]
+
+            for queue in queues_to_declare:
+                channel.queue_declare(
+                    queue=queue, 
+                    durable=True,
+                    arguments={
+                        'x-message-ttl': rabbitmq_ttl_dlx,
+                        'x-dead-letter-exchange': '',
+                        'x-dead-letter-routing-key': '001_notification_process_humanized'
+                    } if queue == '002_notification_reprocess_make_audio' else None
+                )
+                logging.info(f"Fila '{queue}' verificada ou criada.")
+
+            # Registrar o callback para a fila '001_notification_process_humanized'
+            channel.basic_consume(queue='001_notification_process_humanized', on_message_callback=on_message_callback)
+
+            logging.info("Aguardando mensagens...")
+            
+            # Iniciar o consumo de mensagens
+            channel.start_consuming()
+        except Exception as e:
+            logging.error(f"Erro no consumo de mensagens: {str(e)}")
+        finally:
+            if connection and connection.is_open:
+                connection.close()
+                logging.info("Conexão com RabbitMQ fechada.")
+
+    if __name__ == "__main__":
+        try:
+            logging.info("Syrin TTS Make Audio - started \o/")
+            consume_messages()
+        except Exception as e:
+            logging.error(f"Erro na execução da aplicação: {str(e)}")
+
+
+
+kind: ConfigMap
+metadata:
+  name: cm-syrin-make-audio-tts
+  namespace: syrin

@@ -40,7 +40,7 @@ minio_client = Minio(
     secure=False
 )
 
-# Function to download a file from MinIO
+# Function to download the file from MinIO
 def download_from_minio(file_name, output_path):
     try:
         minio_client.fget_object(MINIO_BUCKET_WORK, file_name, output_path)
@@ -79,14 +79,13 @@ def delete_local_file(file_path):
     except OSError as e:
         logging.error(f"Error deleting local file: {file_path} - {str(e)}")
 
-# Function to delete the original file from MinIO (from the bucket where it was downloaded)
+# Function to delete the original file from MinIO (from the bucket it was downloaded from)
 def delete_from_minio(file_name):
     try:
         minio_client.remove_object(MINIO_BUCKET_WORK, file_name)
         logging.info(f"File {file_name} successfully deleted from bucket {MINIO_BUCKET_WORK}.")
     except S3Error as e:
         logging.error(f"Error deleting file {file_name} from bucket: {str(e)}")
-
 
 # Function to play the audio
 def play_audio(output_path):
@@ -117,7 +116,7 @@ def play_audio(output_path):
 
                 if device['max_output_channels'] > 0:
                     try:
-                        logging.info(f"Trying to play on device {i}: {device['name']}")
+                        logging.info(f"Attempting playback on device {i}: {device['name']}")
 
                         # Set the audio device ID
                         sd.default.device = i
@@ -135,10 +134,10 @@ def play_audio(output_path):
                         logging.error(f"Error playing on device {i}: {device['name']}, error: {e}")
 
             if audio_played:
-                logging.info("Text successfully converted and played.")
+                logging.info("Text converted and successfully played.")
                 return True
             else:
-                logging.error("Failed to play audio on any output device.")
+                logging.error("Unable to play the audio on any output device.")
                 return False
         else:
             logging.error("Error finding the audio file for playback.")
@@ -148,7 +147,7 @@ def play_audio(output_path):
         return False
 
 # Function to download, play, upload, and delete the local and bucket file
-def process_audio(file_name):
+def process_audio(file_name, channel, message):
     try:
         output_path = f"/tmp/{file_name}"
 
@@ -164,13 +163,21 @@ def process_audio(file_name):
                     delete_from_minio(file_name)
                 else:
                     logging.error(f"Failed to upload file {file_name} to MinIO.")
+                    # Publish to reprocessing queue
+                    publish_to_reprocess_queue(channel, message)
             else:
                 logging.error(f"Failed to play audio {file_name}.")
                 delete_local_file(output_path)  # Delete the local file even if playback fails
+                # Publish to reprocessing queue
+                publish_to_reprocess_queue(channel, message)
         else:
             logging.error(f"Failed to download file {file_name} from MinIO.")
+            # Publish to reprocessing queue
+            publish_to_reprocess_queue(channel, message)
     except Exception as e:
         logging.error(f"Error processing audio {file_name}: {str(e)}")
+        # Publish to reprocessing queue in case of general error
+        publish_to_reprocess_queue(channel, message)
 
 def publish_to_reproduced_queue(channel, message):
     try:
@@ -195,7 +202,7 @@ def publish_to_reprocess_queue(channel, message):
             arguments={
                 'x-message-ttl': rabbitmq_ttl_dlx,  # TTL configurable via environment variable
                 'x-dead-letter-exchange': '',  # Default DLX to route to another queue
-                'x-dead-letter-routing-key': '003_notification_process_play_audio'  # Queue where the message will be moved
+                'x-dead-letter-routing-key': '003_notification_process_play_audio'  # Queue to move the message to
             }
         )
         # Publish the message to the reprocessing queue
@@ -238,27 +245,29 @@ def on_message_callback(channel, method_frame, header_frame, body):
         logging.info(f"Message received from queue 003_notification_process_play_audio: File: {message['filename']}")
 
         # Process the audio: download, play, upload, and delete locally
-        process_audio(message['filename'])
+        process_audio(message['filename'], channel, message)
 
-        # Publish the item to queue process_notification_reproduced
+        # Publish the item to the process_notification_reproduced queue after success
         publish_to_reproduced_queue(channel, message)
 
-        # Acknowledge message removal from queue 003_notification_process_play_audio
+        # Remove the message from queue 003_notification_process_play_audio
         channel.basic_ack(method_frame.delivery_tag)
     except Exception as e:
         logging.error(f"Error in callback while processing message: {str(e)}")
+        # Send to reprocessing queue if an error occurs
+        publish_to_reprocess_queue(channel, message)
         channel.basic_ack(method_frame.delivery_tag)
 
 def consume_messages():
     try:
         connection = connect_to_rabbitmq()
         if connection is None:
-            logging.error("Failed to connect to RabbitMQ. Shutting down the application.")
+            logging.error("Connection to RabbitMQ failed. Exiting application.")
             return
 
         channel = connection.channel()
 
-        # Declare queues to ensure they exist
+        # Declare the queues to ensure they exist
         queues_to_declare = [
             '003_notification_process_play_audio',
             '003_notification_reprocess_play_audio',
@@ -275,7 +284,7 @@ def consume_messages():
                     'x-dead-letter-routing-key': '003_notification_process_play_audio'
                 } if queue == '003_notification_reprocess_play_audio' else None
             )
-            logging.info(f"Queue '{queue}' verified or created.")
+            logging.info(f"Queue '{queue}' checked or created.")
 
         # Register the callback to consume messages
         channel.basic_consume(queue='003_notification_process_play_audio', on_message_callback=on_message_callback)
