@@ -1,5 +1,8 @@
 
-# ![SYRIN Logo](./Syrin.png)
+<div align="center">
+  <img src="./Syrin.png" alt="SYRIN Logo" width="300"/>
+</div>
+
 
 # SYRIN - Humanized Audio Notification System
 
